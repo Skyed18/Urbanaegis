@@ -329,7 +329,7 @@ function normalizeDistrictKey(districtName) {
     .trim();
 }
 
-function normalizeCrimeStateName(stateName, districtName = '') {
+export function normalizeCrimeStateName(stateName, districtName = '') {
   const state = String(stateName ?? '').trim();
   if (!state) return state;
 
@@ -644,6 +644,7 @@ export async function loadHotspotDatasets() {
   const casualtyPoints = buildCasualtyOverlayPoints(trafficPoints, casualtySummary);
 
   return {
+    districtCrimeRows,
     crimePoints: exactLocation.crimePoints,
     crimeStatePoints: crime.points,
     theftPoints: exactLocation.theftPoints,

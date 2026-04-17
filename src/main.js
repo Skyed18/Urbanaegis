@@ -1,12 +1,12 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import './style.css';
-import { loadHotspotDatasets } from './dataLoader.js';
+import { loadHotspotDatasets, normalizeCrimeStateName } from './dataLoader.js';
 import { NATIONAL_HIGHWAY_CONTACTS, STATE_OPTIONS, getStateEmergencyContacts } from './emergencyContacts.js';
 import { CITY_COORDINATES } from './cityCoordinates.js';
 
 const app = document.querySelector('#app');
-const DEFAULT_USER_LOCATION = { lat: 28.6139, lng: 77.209 };
+const DEFAULT_USER_LOCATION = { lat: 12.9716, lng: 77.5946 };
 const MAP_ROUTE_HASH = '#maps';
 const DASHBOARD_ROUTE_HASH = '#dashboard';
 const HELP_ROUTE_HASH = '#help';
@@ -57,6 +57,7 @@ let currentEmergencyFeedback = null;
 let currentNearestServicesList = null;
 let currentSosFab = null;
 let activityIndexPromise = null;
+let districtDemographicsIndexPromise = null;
 let insightsDistrictDatasetPromise = null;
 let insightsLiveTimer = null;
 let insightsLiveContext = null;
@@ -166,7 +167,7 @@ function createInsightsSection() {
         <div class="insights-risk" id="insightsRiskDashboard">
           <div class="insights-risk-header">
             <div>
-              <h3>Live Safety Score</h3>
+              <h3>Safety Score</h3>
               <p id="insightsRiskMeta">Allow location access to compare your area risk level in real time.</p>
             </div>
             <button type="button" class="btn btn-secondary insights-locate-btn" id="insightsUseLocation">Use My Location</button>
@@ -256,7 +257,7 @@ function createDashboardPage() {
 
       <section class="section dashboard-layout" id="dashboard">
         <article class="risk-panel dashboard-card">
-          <h2>Live Risk Indicator</h2>
+          <h2>Risk Indicator</h2>
           <p class="risk-text">Current City Risk Level: <strong id="dashboardRiskLevel">Moderate</strong></p>
           <div id="dashboardGauge" class="gauge" role="img" aria-label="Current city risk level moderate"></div>
         </article>
@@ -280,23 +281,24 @@ function createDashboardPage() {
             </div>
           </div>
 
-          <div id="activityRecord" class="activity-record" aria-live="polite">Loading activity records...</div>
-        </article>
-
-        <article class="dashboard-card activity-graph-card">
-          <h2>Individual Activities Graph</h2>
+          <h3>Individual Activities Graph</h3>
           <div id="activityGraph" class="activity-graph" aria-live="polite">Loading graph...</div>
         </article>
 
+        <article class="dashboard-card district-profile-card">
+          <h2>District Demographics</h2>
+          <div id="districtProfile" class="district-profile" aria-live="polite">Select a state and district to view the district profile.</div>
+        </article>
+
         <article class="dashboard-card city-ranking-card">
-          <h2>City Rankings by Activity</h2>
+          <h2>State Rankings by Activity</h2>
           <div class="city-ranking-grid">
             <div class="ranking-section">
-              <h3>Top Crime Cities</h3>
+              <h3>All Crime States</h3>
               <ul id="crimeRankingList" class="ranking-list" aria-live="polite">Loading rankings...</ul>
             </div>
             <div class="ranking-section">
-              <h3>Top Accident Cities</h3>
+              <h3>All Accident States</h3>
               <ul id="accidentRankingList" class="ranking-list" aria-live="polite">Loading rankings...</ul>
             </div>
           </div>
@@ -953,18 +955,169 @@ function getDaytimeFactorByHour(hour) {
   return 34;
 }
 
+function getNightMultiplierByHour(hour) {
+  if (hour >= 21 || hour < 5) return 30;
+  if (hour >= 18 && hour < 21) return 22;
+  if (hour >= 5 && hour < 8) return 18;
+  return 12;
+}
+
+function readNumericField(row, field) {
+  const value = Number(row?.[field]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function sumFieldsFromRow(row, fields) {
+  return fields.reduce((total, field) => total + readNumericField(row, field), 0);
+}
+
+function createDistrictSummary() {
+  return {
+    rows: 0,
+    latestYear: 0,
+    murder: 0,
+    rape: 0,
+    kidnapping: 0,
+    assaultOnWomen: 0,
+    robbery: 0,
+    hitAndRun: 0,
+    accidents: 0,
+    otherAccidents: 0,
+  };
+}
+
+function getDistrictSummaryTotal(summary) {
+  if (!summary) return 0;
+  return summary.murder + summary.rape + summary.kidnapping + summary.assaultOnWomen + summary.robbery + summary.hitAndRun + summary.otherAccidents;
+}
+
+function normalizeStateLookupKey(stateName) {
+  return String(stateName ?? '')
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function resolveDemographicsStateName(demographicsIndex, stateName) {
+  const directMatch = demographicsIndex.get(stateName);
+  if (directMatch) return stateName;
+
+  const normalizedTarget = normalizeStateLookupKey(stateName);
+  if (!normalizedTarget) return null;
+
+  for (const key of demographicsIndex.keys()) {
+    if (normalizeStateLookupKey(key) === normalizedTarget) {
+      return key;
+    }
+  }
+
+  return null;
+}
+
+function buildDistrictDemographicsIndex(rows) {
+  const stateMap = new Map();
+
+  for (const row of rows ?? []) {
+    const stateName = normalizeCrimeStateName(row.state_name, row.district_name);
+    const districtName = String(row.district_name ?? '').trim();
+    if (!stateName || !districtName) continue;
+
+    if (!stateMap.has(stateName)) {
+      stateMap.set(stateName, new Map());
+    }
+
+    const districtMap = stateMap.get(stateName);
+    if (!districtMap.has(districtName)) {
+      districtMap.set(districtName, createDistrictSummary());
+    }
+
+    const summary = districtMap.get(districtName);
+    summary.rows += 1;
+    summary.latestYear = Math.max(summary.latestYear, Number(row.year) || 0);
+    summary.murder += readNumericField(row, 'murder');
+    summary.rape += readNumericField(row, 'rape');
+    summary.kidnapping += sumFieldsFromRow(row, [
+      'missing_child_kidnpd',
+      'other_kidnp_abduc',
+      'kidnp_abdctn_begging',
+      'kidnp_abdctn_murder',
+      'kidnapping_for_ransom',
+      'kidnp_abdctn_marrg',
+      'proc_minor_girls',
+      'import_girls_frgn_cntry',
+      'other_kidnp_abduc_sec_365_369',
+      'human_trafficking',
+      'exp_traf_person',
+      'sell_minors_prost',
+      'buy_minors_prost',
+    ]);
+    summary.assaultOnWomen += readNumericField(row, 'assault_on_women') + sumFieldsFromRow(row, [
+      'sex_hrrsmt_work_office_prms',
+      'sex_hrrsmt_pub_trnsprt_sys',
+      'sex_hrrsmt_shelter_homes',
+      'sex_hrrsmt_other_places',
+      'intnt_disrbe',
+      'voyeurism',
+      'stalking',
+    ]);
+    summary.robbery += sumFieldsFromRow(row, ['robbery', 'atmpt_dacoity_robbery', 'dacoity', 'dacoity_with_murder']);
+    summary.hitAndRun += readNumericField(row, 'hit_and_run');
+    summary.accidents += readNumericField(row, 'hit_and_run') + readNumericField(row, 'acdnt_other_than_hit_and_run_');
+    summary.otherAccidents += readNumericField(row, 'acdnt_other_than_hit_and_run_');
+  }
+
+  return stateMap;
+}
+
+function getDistrictSummaryForSelection(demographicsIndex, stateName, districtName) {
+  const stateMap = demographicsIndex.get(stateName);
+  if (!stateMap) return null;
+
+  if (districtName) {
+    return stateMap.get(districtName) ?? null;
+  }
+
+  const combined = createDistrictSummary();
+  stateMap.forEach((summary) => {
+    combined.rows += summary.rows;
+    combined.latestYear = Math.max(combined.latestYear, summary.latestYear);
+    combined.murder += summary.murder;
+    combined.rape += summary.rape;
+    combined.kidnapping += summary.kidnapping;
+    combined.assaultOnWomen += summary.assaultOnWomen;
+    combined.robbery += summary.robbery;
+    combined.hitAndRun += summary.hitAndRun;
+    combined.accidents += summary.accidents;
+    combined.otherAccidents += summary.otherAccidents;
+  });
+
+  return combined.rows > 0 ? combined : null;
+}
+
 function estimateDistrictStats(record) {
   const crime = Math.max(0, Math.round(record.crimeScore));
   const theft = Math.max(0, Math.round(record.theftScore));
   const accident = Math.max(0, Math.round(record.accidentScore));
+  const baseRisk = record.pointCount ? clamp(record.riskSum / record.pointCount, 0, 100) : 0;
+  const nightMultiplier = getNightMultiplierByHour(new Date().getHours());
 
   return {
+    baseRisk,
+    nightMultiplier,
+    nightAdjustedRisk: clamp(baseRisk * (nightMultiplier / 100), 0, 100),
+    crimeScore: crime + theft,
     murder: Math.round(crime * 0.07),
     rape: Math.round(crime * 0.038),
+    kidnapping: Math.round(crime * 0.0025),
+    assaultWomen: Math.round(crime * 0.091),
     robbery: Math.round((crime + theft) * 0.14),
+    dacoity: Math.round(crime * 0.004),
     assault: Math.round(crime * 0.1),
     hitRun: Math.round(accident * 0.28),
     accidents: accident,
+    otherAccidents: Math.max(0, accident - Math.round(accident * 0.28)),
   };
 }
 
@@ -1246,6 +1399,16 @@ function getActivityIndexPromise() {
   return activityIndexPromise;
 }
 
+function getDistrictDemographicsIndexPromise() {
+  if (!districtDemographicsIndexPromise) {
+    districtDemographicsIndexPromise = (hotspotsPromise ??= loadHotspotDatasets()).then((datasets) =>
+      buildDistrictDemographicsIndex(datasets.districtCrimeRows ?? []),
+    );
+  }
+
+  return districtDemographicsIndexPromise;
+}
+
 function mergeActivityRecords(records) {
   return records.reduce(
     (acc, record) => {
@@ -1320,6 +1483,96 @@ function renderActivityGraph(record) {
     .join('');
 }
 
+function renderDistrictDemographics(stateName, districtName, demographicsIndex) {
+  const profile = document.querySelector('#districtProfile');
+  if (!profile) return;
+
+  const normalizedState = normalizeCrimeStateName(stateName, districtName);
+  const resolvedStateName = resolveDemographicsStateName(demographicsIndex, normalizedState);
+  const summary = getDistrictSummaryForSelection(demographicsIndex, resolvedStateName, districtName);
+
+  if (!summary) {
+    profile.innerHTML = '<p>No district profile available for the selected state.</p>';
+    return;
+  }
+
+  const crimeScore = Math.round(
+    getDistrictSummaryTotal(summary),
+  );
+  const baseRisk = crimeScore > 0 ? Math.min(100, Math.round(Math.log10(crimeScore + 1) * 25)) : 0;
+  const nightMultiplier = getNightMultiplierByHour(new Date().getHours());
+  const riskLevel = getRiskLevelFromScore(baseRisk);
+
+  const stateMap = demographicsIndex.get(resolvedStateName);
+  const comparableSummaries = stateMap ? [...stateMap.values()] : [];
+  const percentile = comparableSummaries.length
+    ? Math.min(
+        100,
+        Math.round(
+          ((comparableSummaries.filter((item) => item && item.rows && getDistrictSummaryTotal(item) <= crimeScore).length + 1) / comparableSummaries.length) * 100,
+        ),
+      )
+    : 0;
+
+  const categoryRows = [
+    { label: 'Murder', value: summary.murder, color: '#ff5f6d' },
+    { label: 'Rape', value: summary.rape, color: '#ff7a59' },
+    { label: 'Kidnapping', value: summary.kidnapping, color: '#ff9a4a' },
+    { label: 'Assault on Women', value: summary.assaultOnWomen, color: '#ffb703' },
+    { label: 'Robbery', value: summary.robbery, color: '#f2c14e' },
+    { label: 'Hit & Run', value: summary.hitAndRun, color: '#4bb3fd' },
+    { label: 'Other Accidents', value: summary.otherAccidents, color: '#2f8fff' },
+  ];
+
+  const maxCategory = Math.max(...categoryRows.map((item) => item.value), 1);
+
+  profile.innerHTML = `
+    <div class="district-profile-head">
+      <div>
+        <h3>${districtName || 'All Districts'}</h3>
+      </div>
+      <div class="district-profile-risk">
+        <span class="district-profile-label">Risk Level</span>
+        <strong class="district-profile-pill ${riskLevel.toLowerCase()}">${riskLevel.toUpperCase()}</strong>
+      </div>
+    </div>
+
+    <div class="district-profile-grid">
+      <article class="district-profile-stat">
+        <span>Base Risk</span>
+        <strong>${baseRisk}%</strong>
+      </article>
+      <article class="district-profile-stat">
+        <span>Crime Score</span>
+        <strong>${formatNumber(crimeScore)}</strong>
+      </article>
+      <article class="district-profile-stat"><span>State Percentile</span><strong>${percentile}th</strong></article>
+    </div>
+
+    <div class="district-profile-bars">
+      ${categoryRows
+        .map(
+          (item) => `
+            <div class="district-bar-row">
+              <div class="district-bar-labels">
+                <span>${item.label}</span>
+                <strong>${formatNumber(item.value)}</strong>
+              </div>
+              <div class="district-bar-track">
+                <div class="district-bar-fill" style="width:${Math.max(3, (item.value / maxCategory) * 100)}%; background:${item.color};"></div>
+              </div>
+            </div>
+          `,
+        )
+        .join('')}
+    </div>
+
+    <p class="district-profile-note">
+      <strong>${districtName || 'All Districts'}</strong> ranks in the <strong>${percentile}th percentile</strong> of mapped districts by crime risk · Night multiplier: <strong>${nightMultiplier}%</strong>
+    </p>
+  `;
+}
+
 function formatHourLabel(hour) {
   const normalized = ((hour % 24) + 24) % 24;
   const suffix = normalized >= 12 ? 'PM' : 'AM';
@@ -1378,6 +1631,8 @@ function renderSafetyTimeline(record, stateName, districtName) {
   }
 
   const safestPoint = timeline.reduce((best, point) => (point.riskScore < best.riskScore ? point : best), timeline[0]);
+  const currentHour = new Date().getHours();
+  const currentPoint = timeline.find((point) => point.hour === currentHour) ?? safestPoint;
 
   timelineSummary.textContent = `Safest predicted time for ${stateName}${districtName ? ` / ${districtName}` : ''}: ${safestPoint.hourLabel}`;
 
@@ -1397,6 +1652,9 @@ function renderSafetyTimeline(record, stateName, districtName) {
     .map((point, index) => `${xFor(index).toFixed(2)},${yForRisk(point.riskScore).toFixed(2)}`)
     .join(' ');
 
+  const currentX = xFor(currentHour).toFixed(2);
+  const currentY = yForRisk(currentPoint.riskScore).toFixed(2);
+
   const markerNodes = timeline
     .map((point, index) => {
       const x = xFor(index);
@@ -1405,7 +1663,19 @@ function renderSafetyTimeline(record, stateName, districtName) {
       const isSafest = point.hour === safestPoint.hour;
 
       return `
-        <circle class="timeline-point ${isSafest ? 'safest' : ''}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${isSafest ? 5.5 : 4}">
+        <circle
+          class="timeline-point ${isSafest ? 'safest' : ''}"
+          cx="${x.toFixed(2)}"
+          cy="${y.toFixed(2)}"
+          r="${isSafest ? 5.5 : 4}"
+          tabindex="0"
+          role="img"
+          aria-label="${point.hourLabel}, risk index ${point.riskScore.toFixed(1)}, safety index ${point.safetyScore.toFixed(1)}"
+          data-hour-label="${point.hourLabel}"
+          data-risk-score="${point.riskScore.toFixed(1)}"
+          data-safety-score="${point.safetyScore.toFixed(1)}"
+          data-risk-level="${riskLevel}"
+        >
           <title>${point.hourLabel} · Risk: ${riskLevel} (${point.riskScore.toFixed(1)})</title>
         </circle>
       `;
@@ -1422,12 +1692,30 @@ function renderSafetyTimeline(record, stateName, districtName) {
       <svg class="timeline-svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" role="img" aria-label="24 hour risk timeline graph">
         <line x1="${paddingLeft}" y1="${paddingTop}" x2="${paddingLeft}" y2="${chartHeight - paddingBottom}" class="timeline-axis" />
         <line x1="${paddingLeft}" y1="${chartHeight - paddingBottom}" x2="${chartWidth - paddingRight}" y2="${chartHeight - paddingBottom}" class="timeline-axis" />
+        <line x1="${currentX}" y1="${paddingTop}" x2="${currentX}" y2="${chartHeight - paddingBottom}" class="timeline-current-line" />
+        <circle cx="${currentX}" cy="${currentY}" r="6.5" class="timeline-current-marker" />
         <polyline class="timeline-line" points="${linePoints}" />
         ${markerNodes}
       </svg>
       <div class="timeline-xaxis">${xAxisLabels}</div>
     </div>
   `;
+
+  const points = timelineContainer.querySelectorAll('.timeline-point');
+
+  const showPointDetails = (point) => {
+    if (!point) return;
+    timelineSummary.textContent = `${point.dataset.hourLabel} · Risk index ${point.dataset.riskScore} · Safety index ${point.dataset.safetyScore} · ${point.dataset.riskLevel}`;
+  };
+
+  showPointDetails(currentPoint);
+
+  points.forEach((point) => {
+    point.addEventListener('pointerenter', () => showPointDetails(point));
+    point.addEventListener('focus', () => showPointDetails(point));
+    point.addEventListener('pointerleave', () => showPointDetails(currentPoint));
+    point.addEventListener('blur', () => showPointDetails(currentPoint));
+  });
 }
 
 function computeCityRankings(activityIndex) {
@@ -1456,12 +1744,8 @@ function computeCityRankings(activityIndex) {
     });
   });
 
-  const crimeRankings = Array.from(crimeMap.values())
-    .sort((a, b) => b.crimeScore - a.crimeScore)
-    .slice(0, 5);
-  const accidentRankings = Array.from(accidentMap.values())
-    .sort((a, b) => b.accidentScore - a.accidentScore)
-    .slice(0, 5);
+  const crimeRankings = Array.from(crimeMap.values()).sort((a, b) => b.crimeScore - a.crimeScore);
+  const accidentRankings = Array.from(accidentMap.values()).sort((a, b) => b.accidentScore - a.accidentScore);
 
   return { crimeRankings, accidentRankings };
 }
@@ -1492,14 +1776,11 @@ function renderCityRankings(crimeRankings, accidentRankings) {
 function bindDashboardActions() {
   const stateSelect = document.querySelector('#activityStateSelect');
   const districtSelect = document.querySelector('#activityDistrictSelect');
-  const activityRecord = document.querySelector('#activityRecord');
 
-  if (!stateSelect || !districtSelect || !activityRecord) return;
+  if (!stateSelect || !districtSelect) return;
 
-  activityRecord.textContent = 'Loading activity records...';
-
-  getActivityIndexPromise()
-    .then((activityIndex) => {
+  Promise.all([getActivityIndexPromise(), getDistrictDemographicsIndexPromise()])
+    .then(([activityIndex, demographicsIndex]) => {
       const { crimeRankings, accidentRankings } = computeCityRankings(activityIndex);
       renderCityRankings(crimeRankings, accidentRankings);
       const renderDistrictOptions = (stateName) => {
@@ -1513,9 +1794,9 @@ function bindDashboardActions() {
         const districtMap = activityIndex.get(stateName);
 
         if (!districtMap || !districtMap.size) {
-          activityRecord.innerHTML = '<p>No activity record found for the selected state.</p>';
           renderActivityGraph(null);
           renderSafetyTimeline(null, stateName, selectedDistrict);
+          renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
           setDashboardGauge(0);
           return;
         }
@@ -1525,9 +1806,9 @@ function bindDashboardActions() {
           : mergeActivityRecords(Array.from(districtMap.values()));
 
         if (!record || record.pointCount === 0) {
-          activityRecord.innerHTML = '<p>No activity record found for the selected district.</p>';
           renderActivityGraph(null);
           renderSafetyTimeline(null, stateName, selectedDistrict);
+          renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
           setDashboardGauge(0);
           return;
         }
@@ -1536,17 +1817,7 @@ function bindDashboardActions() {
         setDashboardGauge(Number(averageRisk));
         renderActivityGraph(record);
         renderSafetyTimeline(record, stateName, selectedDistrict);
-
-        activityRecord.innerHTML = `
-          <p><strong>${stateName}${selectedDistrict ? ` / ${selectedDistrict}` : ''}</strong></p>
-          <div class="activity-metrics">
-            <article class="metric-chip"><h3>Crime</h3><p>${formatNumber(record.crimeScore)}</p></article>
-            <article class="metric-chip"><h3>Theft</h3><p>${formatNumber(record.theftScore)}</p></article>
-            <article class="metric-chip"><h3>Accident</h3><p>${formatNumber(record.accidentScore)}</p></article>
-            <article class="metric-chip"><h3>Avg Risk</h3><p>${averageRisk}</p></article>
-          </div>
-          <p class="activity-meta">Records analyzed: ${formatNumber(record.pointCount)} hotspot points</p>
-        `;
+        renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
       };
 
       const onStateChange = () => {
@@ -1561,7 +1832,6 @@ function bindDashboardActions() {
     })
     .catch((error) => {
       console.error(error);
-      activityRecord.textContent = 'Activity records are unavailable right now.';
       setDashboardGauge(0);
       renderActivityGraph(null);
       renderSafetyTimeline(null, '', '');
