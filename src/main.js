@@ -70,6 +70,11 @@ let insightsLiveContext = null;
 let appLoadingOverlay = null;
 let currentAuthUser = null;
 let authObserverInitialized = false;
+let authStateReady = false;
+let resolveAuthStateReady = null;
+const authStateReadyPromise = new Promise((resolve) => {
+  resolveAuthStateReady = resolve;
+});
 const helpPlacesCache = new Map();
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -378,7 +383,7 @@ function createReportPage() {
       <section class="section report-layout" id="report">
         <article class="dashboard-card report-card">
           <h2>Incident Report</h2>
-          <p class="report-intro">Upload incident evidence and provide details to send this report to the database endpoint.</p>
+          <p class="report-intro">Submit verified incident details with evidence. Reports are securely stored for review.</p>
 
           <form id="incidentReportForm" class="report-form" novalidate>
             <div class="dashboard-form-grid report-grid">
@@ -435,7 +440,7 @@ function createLoginPage() {
       <section class="section login-layout" id="login">
         <article class="dashboard-card login-card">
           <h2>Account Access</h2>
-          <p class="login-intro">Login to your account or create a new account to submit incident reports.</p>
+          <p class="login-intro">Sign in to your account or create one to securely submit incident reports.</p>
 
           <div class="login-toggle" role="tablist" aria-label="Choose authentication mode">
             <button type="button" class="btn btn-secondary active" id="loginModeButton" data-mode="login">Login</button>
@@ -460,7 +465,7 @@ function createLoginPage() {
 
             <div class="login-actions">
               <button type="submit" class="btn btn-primary" id="authSubmitButton">Login</button>
-              <button type="button" class="btn btn-secondary" id="authLogoutButton">Logout</button>
+              <button type="button" class="btn btn-secondary login-logout hidden" id="authLogoutButton">Logout</button>
             </div>
 
             <p class="login-status" id="authStatus" aria-live="polite">Checking authentication status...</p>
@@ -1045,7 +1050,9 @@ function bindReportActions() {
     feedback.textContent = message;
   };
 
-  if (!currentAuthUser) {
+  if (!authStateReady) {
+    setFeedback('Checking login status...');
+  } else if (!currentAuthUser) {
     setFeedback('Login required. Please sign in from the Login tab before submitting a report.');
   }
 
@@ -1082,6 +1089,11 @@ function bindReportActions() {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
 
+    if (!authStateReady) {
+      setFeedback('Finalizing login session check...');
+      await authStateReadyPromise;
+    }
+
     const [imageFile] = imageInput.files ?? [];
     const description = descriptionInput.value.trim();
     const location = locationInput.value.trim();
@@ -1102,7 +1114,7 @@ function bindReportActions() {
     }
 
     submitButton.disabled = true;
-    setFeedback('Submitting incident report...');
+    setFeedback('Uploading evidence image to Firebase Storage...');
 
     try {
       const safeName = imageFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -1111,8 +1123,9 @@ function bindReportActions() {
 
       await uploadBytes(storageRef, imageFile);
       const imageUrl = await getDownloadURL(storageRef);
+      setFeedback('Image uploaded. Saving report to Firestore...');
 
-      await addDoc(collection(db, 'incidentReports'), {
+      const reportRef = await addDoc(collection(db, 'incidentReports'), {
         description,
         location,
         imageUrl,
@@ -1120,15 +1133,25 @@ function bindReportActions() {
         userId: currentAuthUser.uid,
         userEmail: currentAuthUser.email ?? null,
         createdAt: serverTimestamp(),
+        status: 'submitted',
       });
 
       form.reset();
       imagePreview.removeAttribute('src');
       imagePreview.classList.remove('visible');
-      setFeedback('Incident report submitted and stored in Firebase successfully.');
+      setFeedback(`Incident report submitted successfully. Report ID: ${reportRef.id}`);
     } catch (error) {
       console.error(error);
-      setFeedback('Unable to submit report to Firebase right now. Please try again.');
+      const code = String(error?.code ?? '');
+      const details =
+        code === 'storage/unauthorized' || code === 'permission-denied'
+          ? 'Permission denied by Firebase rules. Please update Firestore/Storage rules for authenticated users.'
+          : code === 'storage/canceled'
+            ? 'Upload canceled.'
+            : code === 'storage/unknown'
+              ? 'Storage error. Check Firebase Storage setup and bucket rules.'
+              : error?.message ?? 'Unknown error.';
+      setFeedback(`Unable to submit report: ${details}`);
     } finally {
       submitButton.disabled = false;
     }
@@ -1155,16 +1178,28 @@ function bindLoginActions() {
 
   const renderMode = () => {
     const isSignup = mode === 'signup';
+    const isLoggedIn = Boolean(currentAuthUser);
+
     confirmWrap.classList.toggle('hidden', !isSignup);
     confirmInput.required = isSignup;
-    submitButton.textContent = isSignup ? 'Create Account' : 'Login';
+
+    logoutButton.classList.toggle('hidden', !isLoggedIn);
+    submitButton.disabled = isLoggedIn;
+    submitButton.textContent = isLoggedIn ? 'Logged In' : isSignup ? 'Create Account' : 'Login';
+
     loginModeButton.classList.toggle('active', !isSignup);
     signupModeButton.classList.toggle('active', isSignup);
-    status.textContent = currentAuthUser
-      ? `Signed in as ${currentAuthUser.email ?? 'user'}.`
-      : isSignup
-        ? 'Create a new account to start reporting incidents.'
-        : 'Login to submit reports.';
+    loginModeButton.disabled = isLoggedIn;
+    signupModeButton.disabled = isLoggedIn;
+
+    if (isLoggedIn) {
+      status.textContent = `Signed in as ${currentAuthUser.email ?? 'user'}. You can now submit reports.`;
+      return;
+    }
+
+    status.textContent = isSignup
+      ? 'Create a new account to start reporting incidents.'
+      : 'Login to submit reports.';
   };
 
   const setMode = (nextMode) => {
@@ -2344,6 +2379,10 @@ function initializeAuthObserver() {
 
   onAuthStateChanged(auth, (user) => {
     currentAuthUser = user ?? null;
+    if (!authStateReady) {
+      authStateReady = true;
+      resolveAuthStateReady?.();
+    }
     renderRoute();
   });
 }

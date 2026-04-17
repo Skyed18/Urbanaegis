@@ -1471,6 +1471,14 @@ body,
   gap: 0.85rem;
   flex-wrap: wrap;
 }
+.login-logout.hidden {
+  display: none;
+}
+.login-toggle:disabled,
+.login-actions .btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 
 .btn {
   text-decoration: none;
