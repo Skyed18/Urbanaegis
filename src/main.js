@@ -288,6 +288,20 @@ function createDashboardPage() {
           <div id="activityGraph" class="activity-graph" aria-live="polite">Loading graph...</div>
         </article>
 
+        <article class="dashboard-card city-ranking-card">
+          <h2>City Rankings by Activity</h2>
+          <div class="city-ranking-grid">
+            <div class="ranking-section">
+              <h3>Top Crime Cities</h3>
+              <ul id="crimeRankingList" class="ranking-list" aria-live="polite">Loading rankings...</ul>
+            </div>
+            <div class="ranking-section">
+              <h3>Top Accident Cities</h3>
+              <ul id="accidentRankingList" class="ranking-list" aria-live="polite">Loading rankings...</ul>
+            </div>
+          </div>
+        </article>
+
         <article class="dashboard-card timeline-card">
           <h2>24-Hour Safety Timeline</h2>
           <p class="timeline-subtext" id="timelineSummary">Calculating safest time window...</p>
@@ -1416,6 +1430,65 @@ function renderSafetyTimeline(record, stateName, districtName) {
   `;
 }
 
+function computeCityRankings(activityIndex) {
+  const crimeMap = new Map();
+  const accidentMap = new Map();
+
+  activityIndex.forEach((districtMap, stateName) => {
+    districtMap.forEach((record) => {
+      const crimeKey = stateName;
+      const accidentKey = stateName;
+
+      if (!crimeMap.has(crimeKey)) {
+        crimeMap.set(crimeKey, { state: stateName, crimeScore: 0, count: 0 });
+      }
+      if (!accidentMap.has(accidentKey)) {
+        accidentMap.set(accidentKey, { state: stateName, accidentScore: 0, count: 0 });
+      }
+
+      const crimeRecord = crimeMap.get(crimeKey);
+      const accidentRecord = accidentMap.get(accidentKey);
+
+      crimeRecord.crimeScore += record.crimeScore;
+      crimeRecord.count += 1;
+      accidentRecord.accidentScore += record.accidentScore;
+      accidentRecord.count += 1;
+    });
+  });
+
+  const crimeRankings = Array.from(crimeMap.values())
+    .sort((a, b) => b.crimeScore - a.crimeScore)
+    .slice(0, 5);
+  const accidentRankings = Array.from(accidentMap.values())
+    .sort((a, b) => b.accidentScore - a.accidentScore)
+    .slice(0, 5);
+
+  return { crimeRankings, accidentRankings };
+}
+
+function renderCityRankings(crimeRankings, accidentRankings) {
+  const crimeList = document.querySelector('#crimeRankingList');
+  const accidentList = document.querySelector('#accidentRankingList');
+
+  if (crimeList) {
+    crimeList.innerHTML = crimeRankings
+      .map(
+        (item, index) =>
+          `<li class="ranking-item"><span class="rank">#${index + 1}</span><strong>${item.state}</strong><span class="score">${formatNumber(item.crimeScore)}</span></li>`,
+      )
+      .join('');
+  }
+
+  if (accidentList) {
+    accidentList.innerHTML = accidentRankings
+      .map(
+        (item, index) =>
+          `<li class="ranking-item"><span class="rank">#${index + 1}</span><strong>${item.state}</strong><span class="score">${formatNumber(item.accidentScore)}</span></li>`,
+      )
+      .join('');
+  }
+}
+
 function bindDashboardActions() {
   const stateSelect = document.querySelector('#activityStateSelect');
   const districtSelect = document.querySelector('#activityDistrictSelect');
@@ -1427,6 +1500,8 @@ function bindDashboardActions() {
 
   getActivityIndexPromise()
     .then((activityIndex) => {
+      const { crimeRankings, accidentRankings } = computeCityRankings(activityIndex);
+      renderCityRankings(crimeRankings, accidentRankings);
       const renderDistrictOptions = (stateName) => {
         const districts = Array.from(activityIndex.get(stateName)?.keys() ?? []).sort((a, b) => a.localeCompare(b));
         districtSelect.innerHTML = ['<option value="">All Districts</option>', ...districts.map((district) => `<option value="${district}">${district}</option>`)].join('');

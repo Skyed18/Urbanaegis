@@ -742,6 +742,64 @@ body,
   color: var(--muted);
 }
 
+.city-ranking-card {
+  grid-column: 1 / -1;
+}
+
+.city-ranking-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 0.9rem;
+}
+
+.ranking-section {
+  border-radius: 12px;
+  border: 1px solid rgba(135, 187, 238, 0.16);
+  background: rgba(10, 24, 40, 0.56);
+  padding: 0.9rem;
+}
+
+.ranking-section h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: #ffffff;
+}
+
+.ranking-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.ranking-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: rgba(9, 20, 34, 0.6);
+  font-size: 0.9rem;
+}
+
+.ranking-item .rank {
+  font-weight: 700;
+  color: var(--cyan);
+  min-width: 30px;
+}
+
+.ranking-item strong {
+  flex: 1;
+  color: #d7e8f8;
+}
+
+.ranking-item .score {
+  color: #ffb703;
+  font-weight: 700;
+}
+
 .activity-record {
   margin-top: 1rem;
   padding: 1rem;
@@ -1483,6 +1541,7 @@ body,
   .highlight-grid,
   .dashboard-layout,
   .help-layout,
+  .city-ranking-grid,
   .map-layout {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1543,6 +1602,7 @@ body,
   .dashboard-form-grid,
   .activity-metrics,
   .map-layout,
+  .city-ranking-grid,
   .legend-grid {
     grid-template-columns: 1fr;
   }
