@@ -1,0 +1,9 @@
+- [x] Verify `copilot-instructions.md` exists in `.github`.
+- [x] Clarify project requirements (Vite web app for OpenStreetMap crime/accident hotspots).
+- [x] Scaffold the project in the current workspace root.
+- [x] Customize the project for OpenStreetMap + heatmap placeholder flow.
+- [x] Install required extensions (none required).
+- [x] Compile the project (`npm run build` passed).
+- [x] Create and run task (skipped; default npm scripts are sufficient).
+- [x] Launch the project (skipped; awaiting user confirmation).
+- [x] Ensure documentation is complete (`README.md` and `.env.example` added).

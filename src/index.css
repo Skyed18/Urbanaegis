@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, 'Segoe UI', Roboto, system-ui, -apple-system, sans-serif;
+}
+
+.user-location-marker {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  pointer-events: none;
+}
+
+.user-location-ring,
+.user-location-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+}
+
+.user-location-ring {
+  width: 34px;
+  height: 34px;
+  border: 2px solid rgba(96, 165, 250, 0.75);
+  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.45);
+  animation: user-location-pulse 1.8s ease-out infinite;
+}
+
+.user-location-dot {
+  width: 14px;
+  height: 14px;
+  background: radial-gradient(circle at 35% 35%, #e0f2fe 0%, #38bdf8 45%, #2563eb 100%);
+  box-shadow:
+    0 0 10px rgba(56, 189, 248, 0.95),
+    0 0 22px rgba(37, 99, 235, 0.6),
+    0 0 36px rgba(59, 130, 246, 0.35);
+}
+
+@keyframes user-location-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.9);
+    opacity: 0.9;
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.5);
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(1.28);
+    opacity: 0.25;
+    box-shadow: 0 0 0 12px rgba(56, 189, 248, 0);
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.28);
+    opacity: 0;
+    box-shadow: 0 0 0 12px rgba(56, 189, 248, 0);
+  }
+}
