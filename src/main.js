@@ -4,12 +4,18 @@ import './style.css';
 import { loadHotspotDatasets, normalizeCrimeStateName } from './dataLoader.js';
 import { NATIONAL_HIGHWAY_CONTACTS, STATE_OPTIONS, getStateEmergencyContacts } from './emergencyContacts.js';
 import { CITY_COORDINATES } from './cityCoordinates.js';
+import { auth, db, storage } from './firebase.js';
+import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 const app = document.querySelector('#app');
 const DEFAULT_USER_LOCATION = { lat: 12.9716, lng: 77.5946 };
 const MAP_ROUTE_HASH = '#maps';
 const DASHBOARD_ROUTE_HASH = '#dashboard';
 const HELP_ROUTE_HASH = '#help';
+const REPORT_ROUTE_HASH = '#report';
+const LOGIN_ROUTE_HASH = '#login';
 const CRIME_NEWS_LINKS = [
   {
     title: 'Deccan Herald',
@@ -62,6 +68,8 @@ let insightsDistrictDatasetPromise = null;
 let insightsLiveTimer = null;
 let insightsLiveContext = null;
 let appLoadingOverlay = null;
+let currentAuthUser = null;
+let authObserverInitialized = false;
 const helpPlacesCache = new Map();
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -133,6 +141,10 @@ function getNearestLocations(fromLocation, list, count = 3) {
 }
 
 function createNav(activeRoute) {
+  const loginMenuItem = currentAuthUser
+    ? `<li><a href="${LOGIN_ROUTE_HASH}" data-route-link="login" class="nav-user-avatar ${activeRoute === 'login' ? 'active' : ''}" aria-label="Account">👤</a></li>`
+    : `<li><a href="${LOGIN_ROUTE_HASH}" data-route-link="login" class="${activeRoute === 'login' ? 'active' : ''}">Login</a></li>`;
+
   return `
     <header class="nav-shell" id="home">
       <nav class="nav-glass">
@@ -144,6 +156,8 @@ function createNav(activeRoute) {
           <li><a href="#home" data-route-link="home" class="${activeRoute === 'home' ? 'active' : ''}">Home</a></li>
           <li><a href="${DASHBOARD_ROUTE_HASH}" data-route-link="dashboard" class="${activeRoute === 'dashboard' ? 'active' : ''}">Dashboard</a></li>
           <li><a href="${MAP_ROUTE_HASH}" data-route-link="map" class="${activeRoute === 'map' ? 'active' : ''}">Risk Map</a></li>
+          <li><a href="${REPORT_ROUTE_HASH}" data-route-link="report" class="${activeRoute === 'report' ? 'active' : ''}">Report</a></li>
+          ${loginMenuItem}
           <li><a href="${HELP_ROUTE_HASH}" data-route-link="help" class="${activeRoute === 'help' ? 'active' : ''}">Help</a></li>
         </ul>
       </nav>
@@ -285,11 +299,6 @@ function createDashboardPage() {
           <div id="activityGraph" class="activity-graph" aria-live="polite">Loading graph...</div>
         </article>
 
-        <article class="dashboard-card district-profile-card">
-          <h2>District Demographics</h2>
-          <div id="districtProfile" class="district-profile" aria-live="polite">Select a state and district to view the district profile.</div>
-        </article>
-
         <article class="dashboard-card city-ranking-card">
           <h2>State Rankings by Activity</h2>
           <div class="city-ranking-grid">
@@ -353,6 +362,109 @@ function createHelpPage() {
         <article class="dashboard-card help-card">
           <h2>Nearest Police Stations</h2>
           <ul id="helpPoliceList" class="help-service-list" aria-live="polite"></ul>
+        </article>
+      </section>
+
+      ${createEmergencyOverlay()}
+    </main>
+  `;
+}
+
+function createReportPage() {
+  return `
+    <main class="report-page">
+      ${createNav('report')}
+
+      <section class="section report-layout" id="report">
+        <article class="dashboard-card report-card">
+          <h2>Incident Report</h2>
+          <p class="report-intro">Upload incident evidence and provide details to send this report to the database endpoint.</p>
+
+          <form id="incidentReportForm" class="report-form" novalidate>
+            <div class="dashboard-form-grid report-grid">
+              <div>
+                <label class="field-label" for="reportImage">Incident Image</label>
+                <input id="reportImage" name="image" type="file" accept="image/*" class="file-field" required />
+                <img id="reportImagePreview" class="report-preview" alt="Incident preview" />
+              </div>
+
+              <div>
+                <label class="field-label" for="reportLocation">Incident Location</label>
+                <input
+                  id="reportLocation"
+                  name="location"
+                  type="text"
+                  class="text-field"
+                  placeholder="Enter location, landmark, or address"
+                />
+                <button type="button" class="btn btn-secondary report-location-btn" id="reportUseLocation">Use My Current Location</button>
+              </div>
+            </div>
+
+            <div class="report-description-wrap">
+              <label class="field-label" for="reportDescription">Incident Description</label>
+              <textarea
+                id="reportDescription"
+                name="description"
+                class="text-area-field"
+                rows="6"
+                maxlength="2000"
+                placeholder="Describe what happened, when it happened, and any critical details"
+                required
+              ></textarea>
+            </div>
+
+            <div class="report-actions">
+              <button type="submit" class="btn btn-primary" id="reportSubmitButton">Submit Report</button>
+              <p class="report-feedback" id="reportFeedback" aria-live="polite">Your report will be sent once submitted.</p>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      ${createEmergencyOverlay()}
+    </main>
+  `;
+}
+
+function createLoginPage() {
+  return `
+    <main class="login-page">
+      ${createNav('login')}
+
+      <section class="section login-layout" id="login">
+        <article class="dashboard-card login-card">
+          <h2>Account Access</h2>
+          <p class="login-intro">Login to your account or create a new account to submit incident reports.</p>
+
+          <div class="login-toggle" role="tablist" aria-label="Choose authentication mode">
+            <button type="button" class="btn btn-secondary active" id="loginModeButton" data-mode="login">Login</button>
+            <button type="button" class="btn btn-secondary" id="signupModeButton" data-mode="signup">Sign Up</button>
+          </div>
+
+          <form id="authForm" class="login-form" novalidate>
+            <div>
+              <label class="field-label" for="authEmail">Email</label>
+              <input id="authEmail" type="email" class="text-field" placeholder="you@example.com" required />
+            </div>
+
+            <div>
+              <label class="field-label" for="authPassword">Password</label>
+              <input id="authPassword" type="password" class="text-field" minlength="6" placeholder="Enter password" required />
+            </div>
+
+            <div id="confirmPasswordWrap" class="login-confirm hidden">
+              <label class="field-label" for="authConfirmPassword">Confirm Password</label>
+              <input id="authConfirmPassword" type="password" class="text-field" minlength="6" placeholder="Re-enter password" />
+            </div>
+
+            <div class="login-actions">
+              <button type="submit" class="btn btn-primary" id="authSubmitButton">Login</button>
+              <button type="button" class="btn btn-secondary" id="authLogoutButton">Logout</button>
+            </div>
+
+            <p class="login-status" id="authStatus" aria-live="polite">Checking authentication status...</p>
+          </form>
         </article>
       </section>
 
@@ -465,10 +577,16 @@ function setActiveRoute(route) {
   const isMapPage = route === 'map';
   const isDashboardPage = route === 'dashboard';
   const isHelpPage = route === 'help';
+  const isReportPage = route === 'report';
+  const isLoginPage = route === 'login';
   app.innerHTML = isMapPage
     ? createRiskMapPage()
     : isDashboardPage
       ? createDashboardPage()
+      : isLoginPage
+        ? createLoginPage()
+      : isReportPage
+        ? createReportPage()
       : isHelpPage
         ? createHelpPage()
         : createHomePage();
@@ -496,12 +614,24 @@ function setActiveRoute(route) {
     return;
   }
 
+  if (isReportPage) {
+    bindReportActions();
+    return;
+  }
+
+  if (isLoginPage) {
+    bindLoginActions();
+    return;
+  }
+
   bindInsightsActions();
 }
 
 function getCurrentRoute() {
   if (window.location.hash === MAP_ROUTE_HASH || window.location.hash === '#risk-map') return 'map';
   if (window.location.hash === DASHBOARD_ROUTE_HASH) return 'dashboard';
+  if (window.location.hash === REPORT_ROUTE_HASH) return 'report';
+  if (window.location.hash === LOGIN_ROUTE_HASH) return 'login';
   if (window.location.hash === HELP_ROUTE_HASH) return 'help';
   return 'home';
 }
@@ -711,6 +841,16 @@ function bindCommonActions() {
         return;
       }
 
+      if (route === 'report') {
+        window.location.hash = REPORT_ROUTE_HASH;
+        return;
+      }
+
+      if (route === 'login') {
+        window.location.hash = LOGIN_ROUTE_HASH;
+        return;
+      }
+
       if (route === 'help') {
         window.location.hash = HELP_ROUTE_HASH;
       }
@@ -887,6 +1027,206 @@ function bindHelpActions() {
   }
 }
 
+function bindReportActions() {
+  const form = document.querySelector('#incidentReportForm');
+  const imageInput = document.querySelector('#reportImage');
+  const imagePreview = document.querySelector('#reportImagePreview');
+  const locationInput = document.querySelector('#reportLocation');
+  const descriptionInput = document.querySelector('#reportDescription');
+  const locationButton = document.querySelector('#reportUseLocation');
+  const feedback = document.querySelector('#reportFeedback');
+  const submitButton = document.querySelector('#reportSubmitButton');
+
+  if (!form || !imageInput || !imagePreview || !locationInput || !descriptionInput || !locationButton || !feedback || !submitButton) {
+    return;
+  }
+
+  const setFeedback = (message) => {
+    feedback.textContent = message;
+  };
+
+  if (!currentAuthUser) {
+    setFeedback('Login required. Please sign in from the Login tab before submitting a report.');
+  }
+
+  imageInput.addEventListener('change', () => {
+    const [file] = imageInput.files ?? [];
+    if (!file) {
+      imagePreview.removeAttribute('src');
+      imagePreview.classList.remove('visible');
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    imagePreview.src = objectUrl;
+    imagePreview.classList.add('visible');
+  });
+
+  locationButton.addEventListener('click', async () => {
+    locationButton.disabled = true;
+    setFeedback('Detecting your current location...');
+
+    try {
+      const { location, accurate } = await getCurrentLocation();
+      const coordsText = `${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}`;
+      locationInput.value = coordsText;
+      setFeedback(accurate ? 'Current location added.' : 'Fallback location added.');
+    } catch (error) {
+      console.error(error);
+      setFeedback('Unable to detect current location right now.');
+    } finally {
+      locationButton.disabled = false;
+    }
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const [imageFile] = imageInput.files ?? [];
+    const description = descriptionInput.value.trim();
+    const location = locationInput.value.trim();
+
+    if (!imageFile) {
+      setFeedback('Please upload an incident image.');
+      return;
+    }
+
+    if (!description) {
+      setFeedback('Please add a description of the incident.');
+      return;
+    }
+
+    if (!currentAuthUser) {
+      setFeedback('You must be logged in to submit a report.');
+      return;
+    }
+
+    submitButton.disabled = true;
+    setFeedback('Submitting incident report...');
+
+    try {
+      const safeName = imageFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = `incidentReports/${currentAuthUser.uid}/${Date.now()}_${safeName}`;
+      const storageRef = ref(storage, filePath);
+
+      await uploadBytes(storageRef, imageFile);
+      const imageUrl = await getDownloadURL(storageRef);
+
+      await addDoc(collection(db, 'incidentReports'), {
+        description,
+        location,
+        imageUrl,
+        imagePath: filePath,
+        userId: currentAuthUser.uid,
+        userEmail: currentAuthUser.email ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      form.reset();
+      imagePreview.removeAttribute('src');
+      imagePreview.classList.remove('visible');
+      setFeedback('Incident report submitted and stored in Firebase successfully.');
+    } catch (error) {
+      console.error(error);
+      setFeedback('Unable to submit report to Firebase right now. Please try again.');
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+}
+
+function bindLoginActions() {
+  const form = document.querySelector('#authForm');
+  const emailInput = document.querySelector('#authEmail');
+  const passwordInput = document.querySelector('#authPassword');
+  const confirmWrap = document.querySelector('#confirmPasswordWrap');
+  const confirmInput = document.querySelector('#authConfirmPassword');
+  const submitButton = document.querySelector('#authSubmitButton');
+  const logoutButton = document.querySelector('#authLogoutButton');
+  const status = document.querySelector('#authStatus');
+  const loginModeButton = document.querySelector('#loginModeButton');
+  const signupModeButton = document.querySelector('#signupModeButton');
+
+  if (!form || !emailInput || !passwordInput || !confirmWrap || !confirmInput || !submitButton || !logoutButton || !status || !loginModeButton || !signupModeButton) {
+    return;
+  }
+
+  let mode = 'login';
+
+  const renderMode = () => {
+    const isSignup = mode === 'signup';
+    confirmWrap.classList.toggle('hidden', !isSignup);
+    confirmInput.required = isSignup;
+    submitButton.textContent = isSignup ? 'Create Account' : 'Login';
+    loginModeButton.classList.toggle('active', !isSignup);
+    signupModeButton.classList.toggle('active', isSignup);
+    status.textContent = currentAuthUser
+      ? `Signed in as ${currentAuthUser.email ?? 'user'}.`
+      : isSignup
+        ? 'Create a new account to start reporting incidents.'
+        : 'Login to submit reports.';
+  };
+
+  const setMode = (nextMode) => {
+    mode = nextMode;
+    renderMode();
+  };
+
+  loginModeButton.addEventListener('click', () => setMode('login'));
+  signupModeButton.addEventListener('click', () => setMode('signup'));
+
+  logoutButton.addEventListener('click', async () => {
+    try {
+      await signOut(auth);
+      status.textContent = 'Logged out successfully.';
+    } catch (error) {
+      console.error(error);
+      status.textContent = 'Unable to logout right now.';
+    }
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+    const confirmPassword = confirmInput.value;
+
+    if (!email || !password) {
+      status.textContent = 'Please provide email and password.';
+      return;
+    }
+
+    if (mode === 'signup' && password !== confirmPassword) {
+      status.textContent = 'Password and confirm password do not match.';
+      return;
+    }
+
+    submitButton.disabled = true;
+    status.textContent = mode === 'signup' ? 'Creating account...' : 'Logging in...';
+
+    try {
+      if (mode === 'signup') {
+        await createUserWithEmailAndPassword(auth, email, password);
+        status.textContent = 'Account created and logged in successfully.';
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+        status.textContent = 'Logged in successfully.';
+      }
+
+      form.reset();
+      renderMode();
+    } catch (error) {
+      console.error(error);
+      status.textContent = error?.message ? `Auth error: ${error.message}` : 'Authentication failed.';
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+
+  renderMode();
+}
+
 function getCrimeNewsLinks() {
   const fromWindow = Array.isArray(window.CRIME_NEWS_LINKS) ? window.CRIME_NEWS_LINKS : [];
   const source = fromWindow.length ? fromWindow : CRIME_NEWS_LINKS;
@@ -1000,6 +1340,14 @@ function normalizeStateLookupKey(stateName) {
     .trim();
 }
 
+function normalizeDistrictLookupKey(districtName) {
+  return String(districtName ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function resolveDemographicsStateName(demographicsIndex, stateName) {
   const directMatch = demographicsIndex.get(stateName);
   if (directMatch) return stateName;
@@ -1009,6 +1357,24 @@ function resolveDemographicsStateName(demographicsIndex, stateName) {
 
   for (const key of demographicsIndex.keys()) {
     if (normalizeStateLookupKey(key) === normalizedTarget) {
+      return key;
+    }
+  }
+
+  return null;
+}
+
+function resolveDemographicsDistrictName(stateMap, districtName) {
+  if (!stateMap || !districtName) return null;
+
+  const directMatch = stateMap.get(districtName);
+  if (directMatch) return districtName;
+
+  const normalizedTarget = normalizeDistrictLookupKey(districtName);
+  if (!normalizedTarget) return null;
+
+  for (const key of stateMap.keys()) {
+    if (normalizeDistrictLookupKey(key) === normalizedTarget) {
       return key;
     }
   }
@@ -1076,7 +1442,8 @@ function getDistrictSummaryForSelection(demographicsIndex, stateName, districtNa
   if (!stateMap) return null;
 
   if (districtName) {
-    return stateMap.get(districtName) ?? null;
+    const resolvedDistrictName = resolveDemographicsDistrictName(stateMap, districtName);
+    return resolvedDistrictName ? stateMap.get(resolvedDistrictName) : null;
   }
 
   const combined = createDistrictSummary();
@@ -1489,10 +1856,10 @@ function renderDistrictDemographics(stateName, districtName, demographicsIndex) 
 
   const normalizedState = normalizeCrimeStateName(stateName, districtName);
   const resolvedStateName = resolveDemographicsStateName(demographicsIndex, normalizedState);
-  const summary = getDistrictSummaryForSelection(demographicsIndex, resolvedStateName, districtName);
+  const summary = getDistrictSummaryForSelection(demographicsIndex, resolvedStateName, '');
 
   if (!summary) {
-    profile.innerHTML = '<p>No district profile available for the selected state.</p>';
+    profile.innerHTML = '<p>No state profile available for the selected state.</p>';
     return;
   }
 
@@ -1503,13 +1870,31 @@ function renderDistrictDemographics(stateName, districtName, demographicsIndex) 
   const nightMultiplier = getNightMultiplierByHour(new Date().getHours());
   const riskLevel = getRiskLevelFromScore(baseRisk);
 
-  const stateMap = demographicsIndex.get(resolvedStateName);
-  const comparableSummaries = stateMap ? [...stateMap.values()] : [];
-  const percentile = comparableSummaries.length
+  const stateSummaries = Array.from(demographicsIndex.entries())
+    .map(([name, map]) => {
+      const combinedSummary = createDistrictSummary();
+      map.forEach((item) => {
+        combinedSummary.rows += item.rows;
+        combinedSummary.latestYear = Math.max(combinedSummary.latestYear, item.latestYear);
+        combinedSummary.murder += item.murder;
+        combinedSummary.rape += item.rape;
+        combinedSummary.kidnapping += item.kidnapping;
+        combinedSummary.assaultOnWomen += item.assaultOnWomen;
+        combinedSummary.robbery += item.robbery;
+        combinedSummary.hitAndRun += item.hitAndRun;
+        combinedSummary.accidents += item.accidents;
+        combinedSummary.otherAccidents += item.otherAccidents;
+      });
+
+      return { name, summary: combinedSummary };
+    })
+    .filter((item) => item.summary.rows > 0);
+
+  const percentile = stateSummaries.length
     ? Math.min(
         100,
         Math.round(
-          ((comparableSummaries.filter((item) => item && item.rows && getDistrictSummaryTotal(item) <= crimeScore).length + 1) / comparableSummaries.length) * 100,
+          ((stateSummaries.filter((item) => getDistrictSummaryTotal(item.summary) <= crimeScore).length + 1) / stateSummaries.length) * 100,
         ),
       )
     : 0;
@@ -1529,7 +1914,7 @@ function renderDistrictDemographics(stateName, districtName, demographicsIndex) 
   profile.innerHTML = `
     <div class="district-profile-head">
       <div>
-        <h3>${districtName || 'All Districts'}</h3>
+        <h3>${stateName}</h3>
       </div>
       <div class="district-profile-risk">
         <span class="district-profile-label">Risk Level</span>
@@ -1568,7 +1953,7 @@ function renderDistrictDemographics(stateName, districtName, demographicsIndex) 
     </div>
 
     <p class="district-profile-note">
-      <strong>${districtName || 'All Districts'}</strong> ranks in the <strong>${percentile}th percentile</strong> of mapped districts by crime risk · Night multiplier: <strong>${nightMultiplier}%</strong>
+      <strong>${stateName}</strong> ranks in the <strong>${percentile}th percentile</strong> of mapped states by crime risk · Night multiplier: <strong>${nightMultiplier}%</strong>
     </p>
   `;
 }
@@ -1779,8 +2164,8 @@ function bindDashboardActions() {
 
   if (!stateSelect || !districtSelect) return;
 
-  Promise.all([getActivityIndexPromise(), getDistrictDemographicsIndexPromise()])
-    .then(([activityIndex, demographicsIndex]) => {
+  getActivityIndexPromise()
+    .then((activityIndex) => {
       const { crimeRankings, accidentRankings } = computeCityRankings(activityIndex);
       renderCityRankings(crimeRankings, accidentRankings);
       const renderDistrictOptions = (stateName) => {
@@ -1796,7 +2181,6 @@ function bindDashboardActions() {
         if (!districtMap || !districtMap.size) {
           renderActivityGraph(null);
           renderSafetyTimeline(null, stateName, selectedDistrict);
-          renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
           setDashboardGauge(0);
           return;
         }
@@ -1808,7 +2192,6 @@ function bindDashboardActions() {
         if (!record || record.pointCount === 0) {
           renderActivityGraph(null);
           renderSafetyTimeline(null, stateName, selectedDistrict);
-          renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
           setDashboardGauge(0);
           return;
         }
@@ -1817,7 +2200,6 @@ function bindDashboardActions() {
         setDashboardGauge(Number(averageRisk));
         renderActivityGraph(record);
         renderSafetyTimeline(record, stateName, selectedDistrict);
-        renderDistrictDemographics(stateName, selectedDistrict, demographicsIndex);
       };
 
       const onStateChange = () => {
@@ -1956,8 +2338,19 @@ function renderRoute() {
   setActiveRoute(getCurrentRoute());
 }
 
+function initializeAuthObserver() {
+  if (authObserverInitialized) return;
+  authObserverInitialized = true;
+
+  onAuthStateChanged(auth, (user) => {
+    currentAuthUser = user ?? null;
+    renderRoute();
+  });
+}
+
 async function bootstrapApp() {
   showAppLoader('Loading city safety intelligence...');
+  initializeAuthObserver();
 
   try {
     hotspotsPromise ??= loadHotspotDatasets();

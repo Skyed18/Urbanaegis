@@ -16,6 +16,7 @@
     "vite": "^8.0.4"
   },
   "dependencies": {
+    "firebase": "^12.12.0",
     "framer-motion": "^12.38.0",
     "leaflet": "^1.9.4",
     "leaflet.heat": "^0.2.0",
